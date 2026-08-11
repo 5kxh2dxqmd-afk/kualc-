@@ -1,0 +1,4 @@
+/build/
+/build-kindle/
+/dist/
+*.tar.gz
