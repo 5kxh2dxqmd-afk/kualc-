@@ -1,6 +1,6 @@
 #!/bin/sh
-# Name: KUAL Native
-# Author: KUAL Native contributors
+# Name: KUAL - Native
+# Author: dan
 #
 # Copy this scriptlet to documents using the post-jailbreak mechanism that
 # executes .sh document items. The ARM binary lives in the extension package.
