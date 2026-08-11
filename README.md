@@ -1,7 +1,7 @@
 # KUAL Native
 
 This is a Java-free replacement for KUAL's menu and action engine.  The old
-installer in `KUAL-2.sh` registers `KUALBooklet.jar` with `appmgrd`; that
+installer in the original `KUAL.sh` registers `KUALBooklet.jar` with `appmgrd`; that
 registration cannot work when the Java/Kindlet runtime is absent, so it is not
 used by this implementation.
 
