@@ -215,7 +215,7 @@ static InputEvent next_input() {
 static std::string clipped(const std::string& text, size_t width) { return text.size() <= width ? text : text.substr(0, width > 3 ? width - 3 : 0) + "..."; }
 class Canvas {
  public:
-  Canvas(int width, int height) : width_(width), height_(height), pixels_(static_cast<size_t>(width) * height, 0) {}
+  Canvas(int width, int height) : width_(width), height_(height), pixels_(static_cast<size_t>(width) * height, 255) {}
   void rounded(int x, int y, int width, int height, int radius, unsigned char colour) {
     for (int py = std::max(0, y); py < std::min(height_, y + height); ++py) for (int px = std::max(0, x); px < std::min(width_, x + width); ++px) {
       int dx = 0, dy = 0; if (px < x + radius) dx = x + radius - px; else if (px >= x + width - radius) dx = px - (x + width - radius - 1);
@@ -224,7 +224,7 @@ class Canvas {
     }
   }
   void outline(int x, int y, int width, int height, int radius, unsigned char colour, int stroke = 2) {
-    rounded(x, y, width, height, radius, colour); rounded(x + stroke, y + stroke, width - 2 * stroke, height - 2 * stroke, std::max(0, radius - stroke), 0);
+    rounded(x, y, width, height, radius, colour); rounded(x + stroke, y + stroke, width - 2 * stroke, height - 2 * stroke, std::max(0, radius - stroke), 255);
   }
   bool save(const std::string& path) const {
     std::ofstream out(path, std::ios::binary); if (!out) return false;
@@ -243,27 +243,27 @@ static Layout make_layout(Screen screen) {
 }
 static void print_text(const std::string& fbink, const std::string& text, int px, int top, int bottom, int left, int right, bool centered) {
   const std::string font = "regular=/usr/java/lib/fonts/Futura-Medium.ttf,bold=/usr/java/lib/fonts/Futura-Bold.ttf,px=" + std::to_string(px) + ",top=" + std::to_string(top) + ",bottom=" + std::to_string(bottom) + ",left=" + std::to_string(left) + ",right=" + std::to_string(right);
-  std::string command = shell_quote(fbink) + " -q -b -C WHITE -B BLACK " + (centered ? "-m " : "") + "-t " + shell_quote(font) + " " + shell_quote(text) + " >/dev/null 2>&1";
+  std::string command = shell_quote(fbink) + " -q -b -C BLACK -B WHITE " + (centered ? "-m " : "") + "-t " + shell_quote(font) + " " + shell_quote(text) + " >/dev/null 2>&1";
   run_quietly(command);
 }
 static std::string breadcrumb(const std::vector<std::string>& trail) {
   std::string path = "/"; for (const std::string& label : trail) path += label + "/"; return path;
 }
 static void draw_ui(const std::string& fbink, const Layout& l, const std::vector<Entry>& current, const std::vector<std::string>& trail, size_t offset, size_t selected, const std::string& message, bool no_status) {
-  Canvas canvas(l.width, l.height); const int radius = std::max(8, l.width / 64); const unsigned char border = 190, disabled = 95;
+  Canvas canvas(l.width, l.height); const int radius = std::max(8, l.width / 64); const unsigned char border = 110, disabled = 180;
   canvas.outline(l.gap, l.top, l.rail - l.gap, l.bottom - l.top, radius, trail.empty() ? disabled : border);
   canvas.outline(l.width - l.rail + l.gap, l.top, l.rail - l.gap, l.bottom - l.top, radius, border);
   for (size_t row = 0; row < 10; ++row) {
     size_t index = offset + row; if (index > current.size()) break;
     const int y = l.top + static_cast<int>(row) * (l.button_height + l.button_gap);
-    canvas.outline(l.content_x, y, l.content_width, l.button_height, radius, index == selected ? 255 : border);
+    canvas.outline(l.content_x, y, l.content_width, l.button_height, radius, index == selected ? 0 : border);
   }
   const std::string image = "/tmp/kual-native-ui.pgm"; if (!canvas.save(image)) return;
   run_quietly(shell_quote(fbink) + " -q -b -g " + shell_quote("file=" + image) + " >/dev/null 2>&1");
   const int header_px = std::max(20, l.height * 34 / 1696), label_px = std::max(22, l.height * 42 / 1696), status_px = std::max(18, l.height * 34 / 1696);
   print_text(fbink, std::string(geteuid() == 0 ? "#  " : "$  ") + "\xE2\x96\xAA  " + clipped(breadcrumb(trail), 58), header_px, 5, l.height - l.top + 5, l.gap, l.width / 2, false);
   if (!trail.empty()) print_text(fbink, "\xE2\x97\x80", label_px, (l.top + l.bottom) / 2 - label_px, l.height - ((l.top + l.bottom) / 2 + label_px), 0, l.width - l.rail, true);
-  if (current.size() + 1 > 10) print_text(fbink, "\xE2\x96\xB6", label_px, (l.top + l.bottom) / 2 - label_px, l.height - ((l.top + l.bottom) / 2 + label_px), l.rail, 0, true);
+  if (current.size() + 1 > 10) print_text(fbink, "\xE2\x96\xB6", label_px, (l.top + l.bottom) / 2 - label_px, l.height - ((l.top + l.bottom) / 2 + label_px), l.width - l.rail, 0, true);
   const size_t count = current.size() + 1; const size_t last = std::min(count, offset + 10);
   for (size_t index = offset; index < last; ++index) {
     const size_t row = index - offset; const int top = l.top + static_cast<int>(row) * (l.button_height + l.button_gap) + l.button_height / 2 - label_px;
