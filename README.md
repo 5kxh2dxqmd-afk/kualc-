@@ -49,9 +49,16 @@ baseline for the practical post-K5 Kindle range.
 Install the resulting executable as
 `/mnt/us/extensions/KUAL/bin/kual-native`; `scripts/kual-native` is the small
 stable launcher intended for the device-native UI integration. Running the
-binary without arguments on a Kindle opens its touch/key-controlled menu. It
-uses the firmware's `eips` program for e-ink drawing and Linux evdev for input,
-so it does not depend on Java or an undocumented Amazon UI library.
+binary without arguments on a Kindle opens the original KUAL-style dark UI:
+breadcrumb, ten rounded menu buttons, left/right paging rails, submenu
+indicator, final `× Quit`/`/` button, and status line. It renders through
+FBInk (not `eips`) and uses Linux evdev for touch and key input.
+
+FBInk must be installed on the Kindle. The launcher automatically tries
+`/mnt/us/extensions/KUAL/bin/fbink`, `/mnt/us/libkh/bin/fbink`, KOReader's
+copy, and MRInstaller's copy; set `FBINK=/path/to/fbink` to use another one.
+The UI uses the stock Futura fonts and batches a complete screen into one
+FBInk refresh to avoid per-label flashing.
 
 For current firmware, copy [KUAL-Native.sh](scripts/KUAL-Native.sh) to the
 documents area through the same scriptlet mechanism used by your jailbreak,
@@ -65,14 +72,13 @@ or Amazon's current app-registration ABI. This launcher deliberately avoids
 that ABI: a compatible post-jailbreak document scriptlet starts the binary,
 and it owns its e-ink screen while open. `--list` and `--run 'Menu/Item'` are
 also available for automated launchers. The supplied JAR's original `parse.awk`
-grammar has additional presentation flags (`checked`, `refresh`, `status`,
-`date`, `hidden`, and `exitmenu`); those are not yet represented in the native
-screen.
+presentation flags (`checked`, `refresh`, `status`, `date`, `hidden`, and
+`exitmenu`) are represented in the native UI.
 
 ## Target scope
 
 The target is post-K5, jailbroken Kindles with a working document-scriptlet
-entry point, `eips`, `/dev/fb0`, and Linux evdev input nodes. This covers the
+entry point, FBInk, `/dev/fb0`, and Linux evdev input nodes. This covers the
 practical newer Kindle family without claiming support for firmware where
 Amazon has also removed the scriptlet entry point. The program safely exits if
 it cannot open an input device.

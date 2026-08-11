@@ -10,6 +10,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -131,6 +132,18 @@ static void load_menus_at(const std::string& root, std::vector<Entry>& result, u
 static std::vector<Entry> load_menus(const std::string& root) {
   std::vector<Entry> result; load_menus_at(root, result); return result;
 }
+[[maybe_unused]] static std::map<std::string, std::string> load_config(const std::string& root) {
+  std::map<std::string, std::string> result;
+  std::ifstream f(root + "/KUAL.cfg"); std::string line;
+  while (std::getline(f, line)) {
+    const std::string prefix = "KUAL_"; if (line.compare(0, prefix.size(), prefix) != 0) continue;
+    const size_t split = line.find('='); if (split == std::string::npos) continue;
+    std::string value = line.substr(split + 1);
+    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') value = value.substr(1, value.size() - 2);
+    result[line.substr(prefix.size(), split - prefix.size())] = value;
+  }
+  return result;
+}
 static int execute(const Entry& e) {
   if (e.action.empty()) return 0;
   pid_t child = fork();
@@ -152,25 +165,31 @@ static void run_quietly(const std::string& command) {
   const int status = std::system(command.c_str());
   if (status == -1) return;
 }
-static void eips(int row, const std::string& text) {
-  // eips is present on supported Kindle firmware and performs the
-  // firmware-specific e-ink refresh; calling it avoids hard-coding private
-  // framebuffer update ioctls that differ by generation.
-  std::string command = "eips 2 " + std::to_string(row) + " " + shell_quote(text) + " >/dev/null 2>&1";
-  run_quietly(command);
+static std::string fbink_path() {
+  if (const char* path = std::getenv("FBINK")) return path;
+  const char* candidates[] = {"/mnt/us/extensions/KUAL/bin/fbink", "/mnt/us/libkh/bin/fbink", "/mnt/us/koreader/fbink", "/mnt/us/extensions/MRInstaller/bin/KHF/fbink", "fbink"};
+  for (const char* candidate : candidates) if (std::string(candidate) == "fbink" || access(candidate, X_OK) == 0) return candidate;
+  return "fbink";
 }
-static int screen_rows() {
-  int fd = open("/dev/fb0", O_RDONLY); if (fd < 0) return 24; fb_var_screeninfo info {};
-  bool ok = ioctl(fd, FBIOGET_VSCREENINFO, &info) == 0; close(fd); return ok ? std::max(12U, info.yres / 24) : 24;
+static bool fbink_available(const std::string& fbink) {
+  return std::system((shell_quote(fbink) + " -q -e >/dev/null 2>&1").c_str()) == 0;
+}
+struct Screen { int width = 1272, height = 1696; };
+static Screen screen_size() {
+  int fd = open("/dev/fb0", O_RDONLY); fb_var_screeninfo info {};
+  if (fd >= 0 && ioctl(fd, FBIOGET_VSCREENINFO, &info) == 0) { close(fd); return {static_cast<int>(info.xres), static_cast<int>(info.yres)}; }
+  if (fd >= 0) close(fd); return {};
 }
 enum class Input { Up, Down, Select, Back };
 struct InputEvent { Input kind; int x = -1, y = -1, x_max = 0, y_max = 0; };
 static InputEvent next_input() {
   std::vector<int> fds, x_max, y_max, last_x, last_y; std::vector<bool> touched;
   auto close_inputs = [&fds] { for (int fd : fds) close(fd); };
-  for (int n = 0; n < 16; ++n) { std::string path = "/dev/input/event" + std::to_string(n); int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK); if (fd < 0) continue;
+  for (int n = 0; n < 32; ++n) { std::string path = "/dev/input/event" + std::to_string(n); int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK); if (fd < 0) continue;
     input_absinfo abs {}; int xmaximum = ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &abs) == 0 ? abs.maximum : 0;
     int ymaximum = ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &abs) == 0 ? abs.maximum : 0;
+    if (!xmaximum) xmaximum = ioctl(fd, EVIOCGABS(ABS_X), &abs) == 0 ? abs.maximum : 0;
+    if (!ymaximum) ymaximum = ioctl(fd, EVIOCGABS(ABS_Y), &abs) == 0 ? abs.maximum : 0;
     fds.push_back(fd); x_max.push_back(xmaximum); y_max.push_back(ymaximum); last_x.push_back(0); last_y.push_back(0); touched.push_back(false); }
   if (fds.empty()) return {Input::Back};
   for (;;) { std::vector<pollfd> watches(fds.size()); for (size_t i = 0; i < fds.size(); ++i) watches[i] = {fds[i], POLLIN, 0}; if (poll(watches.data(), watches.size(), -1) < 0) continue;
@@ -189,42 +208,108 @@ static InputEvent next_input() {
     }
   }
 }
-static std::string clipped(const std::string& text, size_t width = 56) { return text.size() <= width ? text : text.substr(0, width - 3) + "..."; }
+static std::string clipped(const std::string& text, size_t width) { return text.size() <= width ? text : text.substr(0, width > 3 ? width - 3 : 0) + "..."; }
+class Canvas {
+ public:
+  Canvas(int width, int height) : width_(width), height_(height), pixels_(static_cast<size_t>(width) * height, 0) {}
+  void rounded(int x, int y, int width, int height, int radius, unsigned char colour) {
+    for (int py = std::max(0, y); py < std::min(height_, y + height); ++py) for (int px = std::max(0, x); px < std::min(width_, x + width); ++px) {
+      int dx = 0, dy = 0; if (px < x + radius) dx = x + radius - px; else if (px >= x + width - radius) dx = px - (x + width - radius - 1);
+      if (py < y + radius) dy = y + radius - py; else if (py >= y + height - radius) dy = py - (y + height - radius - 1);
+      if (dx * dx + dy * dy <= radius * radius) pixels_[static_cast<size_t>(py) * width_ + px] = colour;
+    }
+  }
+  void outline(int x, int y, int width, int height, int radius, unsigned char colour, int stroke = 2) {
+    rounded(x, y, width, height, radius, colour); rounded(x + stroke, y + stroke, width - 2 * stroke, height - 2 * stroke, std::max(0, radius - stroke), 0);
+  }
+  bool save(const std::string& path) const {
+    std::ofstream out(path, std::ios::binary); if (!out) return false;
+    out << "P5\n" << width_ << " " << height_ << "\n255\n"; out.write(reinterpret_cast<const char*>(pixels_.data()), static_cast<std::streamsize>(pixels_.size())); return static_cast<bool>(out);
+  }
+ private:
+  int width_, height_; std::vector<unsigned char> pixels_;
+};
+struct Layout { int width, height, top, bottom, rail, gap, button_height, button_gap, content_x, content_width, status_y; };
+static Layout make_layout(Screen screen) {
+  const auto scale_x = [screen](int value) { return std::max(1, value * screen.width / 1272); };
+  const auto scale_y = [screen](int value) { return std::max(1, value * screen.height / 1696); };
+  Layout l {screen.width, screen.height, scale_y(62), scale_y(1634), scale_x(136), scale_x(5), 0, scale_y(6), 0, 0, scale_y(1642)};
+  l.content_x = l.rail + l.gap * 2; l.content_width = l.width - 2 * l.rail - l.gap * 4;
+  l.button_height = (l.bottom - l.top - l.button_gap * 9) / 10; return l;
+}
+static void print_text(const std::string& fbink, const std::string& text, int px, int top, int bottom, int left, int right, bool centered) {
+  const std::string font = "regular=/usr/java/lib/fonts/Futura-Medium.ttf,bold=/usr/java/lib/fonts/Futura-Bold.ttf,px=" + std::to_string(px) + ",top=" + std::to_string(top) + ",bottom=" + std::to_string(bottom) + ",left=" + std::to_string(left) + ",right=" + std::to_string(right);
+  std::string command = shell_quote(fbink) + " -q -b -C WHITE -B BLACK " + (centered ? "-m " : "") + "-t " + shell_quote(font) + " " + shell_quote(text) + " >/dev/null 2>&1";
+  run_quietly(command);
+}
+static std::string breadcrumb(const std::vector<std::string>& trail) {
+  std::string path = "/"; for (const std::string& label : trail) path += label + "/"; return path;
+}
+static void draw_ui(const std::string& fbink, const Layout& l, const std::vector<Entry>& current, const std::vector<std::string>& trail, size_t offset, size_t selected, const std::string& message, bool no_status) {
+  Canvas canvas(l.width, l.height); const int radius = std::max(8, l.width / 64); const unsigned char border = 190, disabled = 95;
+  canvas.outline(l.gap, l.top, l.rail - l.gap, l.bottom - l.top, radius, trail.empty() ? disabled : border);
+  canvas.outline(l.width - l.rail + l.gap, l.top, l.rail - l.gap, l.bottom - l.top, radius, border);
+  for (size_t row = 0; row < 10; ++row) {
+    size_t index = offset + row; if (index > current.size()) break;
+    const int y = l.top + static_cast<int>(row) * (l.button_height + l.button_gap);
+    canvas.outline(l.content_x, y, l.content_width, l.button_height, radius, index == selected ? 255 : border);
+  }
+  const std::string image = "/tmp/kual-native-ui.pgm"; if (!canvas.save(image)) return;
+  run_quietly(shell_quote(fbink) + " -q -b -g " + shell_quote("file=" + image) + " >/dev/null 2>&1");
+  const int header_px = std::max(20, l.height * 34 / 1696), label_px = std::max(22, l.height * 42 / 1696), status_px = std::max(18, l.height * 34 / 1696);
+  print_text(fbink, std::string(geteuid() == 0 ? "#  " : "$  ") + "\xE2\x96\xAA  " + clipped(breadcrumb(trail), 58), header_px, 5, l.height - l.top + 5, l.gap, l.width / 2, false);
+  if (!trail.empty()) print_text(fbink, "\xE2\x97\x80", label_px, (l.top + l.bottom) / 2 - label_px, l.height - ((l.top + l.bottom) / 2 + label_px), 0, l.width - l.rail, true);
+  if (current.size() + 1 > 10) print_text(fbink, "\xE2\x96\xB6", label_px, (l.top + l.bottom) / 2 - label_px, l.height - ((l.top + l.bottom) / 2 + label_px), l.rail, 0, true);
+  const size_t count = current.size() + 1; const size_t last = std::min(count, offset + 10);
+  for (size_t index = offset; index < last; ++index) {
+    const size_t row = index - offset; const int top = l.top + static_cast<int>(row) * (l.button_height + l.button_gap) + l.button_height / 2 - label_px;
+    std::string label = index == current.size() ? (trail.empty() ? "\xC3\x97 Quit" : "/") : current[index].name + (!current[index].children.empty() ? "  \xE2\x96\xBD" : "");
+    if (index < current.size() && current[index].checked) label = "\xE2\x9C\x93 " + label;
+    print_text(fbink, clipped(label, 54), label_px, top, l.height - (top + label_px * 2), l.content_x + 12, l.width - (l.content_x + l.content_width - 12), true);
+  }
+  if (!no_status) {
+    const std::string footer = message.empty() ? "Entries " + std::to_string(offset + 1) + " - " + std::to_string(last) + " of " + std::to_string(count) + " | KUAL Native | FBInk" : clipped(message, 70);
+    print_text(fbink, footer, status_px, l.status_y, 0, l.gap, l.gap, false);
+  }
+  run_quietly(shell_quote(fbink) + " -q -s -W GC16 >/dev/null 2>&1");
+}
+static size_t page_offset(size_t offset, int direction, size_t count) {
+  constexpr size_t page_size = 10; if (direction > 0) return offset + page_size < count ? offset + page_size : 0;
+  if (offset >= page_size) return offset - page_size; size_t last = count - count % page_size; return last == count && last >= page_size ? last - page_size : last;
+}
 static bool run_ui(std::vector<Entry> menu, const std::string& root = "/mnt/us/extensions") {
-  constexpr size_t page_size = 10;
-  std::vector<std::vector<Entry>*> trail; std::vector<std::string> labels; std::vector<size_t> offsets(1, 0); std::vector<Entry>* current = &menu;
-  size_t selected = 0; const int rows = screen_rows(); const int first_row = 5; const int step = std::max(3, (rows - 9) / static_cast<int>(page_size));
-  std::string message;
+  const std::string fbink = fbink_path(); if (!fbink_available(fbink)) { std::cerr << "kual-native: FBInk is required (set FBINK or install fbink).\n"; return false; }
+  const Layout layout = make_layout(screen_size()); const auto config = load_config(root); const bool no_status = config.count("no_show_status") && config.at("no_show_status") == "true";
+  size_t page_size = 10; if (auto it = config.find("page_size"); it != config.end()) { try { page_size = std::max<size_t>(1, std::min<size_t>(10, static_cast<size_t>(std::stoul(it->second)))); } catch (...) {} }
+  // KUAL's original view has ten fixed grid slots.  Values below ten reserve
+  // the unused slots, so external KUAL.cfg files remain safe to use.
+  (void)page_size;
+  std::vector<std::vector<Entry>*> trail_menus; std::vector<std::string> trail; std::vector<size_t> offsets(1, 0); std::vector<Entry>* current = &menu;
+  size_t selected = 0; std::string message;
   for (;;) {
-    const size_t count = current->size() + 1; size_t& offset = offsets.back(); if (offset >= count) offset = 0;
-    if (selected >= count) selected = 0;
-    const size_t last = std::min(count, offset + page_size);
-    run_quietly("eips -c >/dev/null 2>&1");
-    std::string path = "/"; for (const auto& label : labels) path += label + "/"; eips(1, "#  KUAL  " + clipped(path, 55));
-    eips(2, std::string(trail.empty() ? "    " : "[ < Back ]") + "     [ KUAL menu ]     " + (count > page_size ? "[ Next > ]" : ""));
-    for (size_t i = offset; i < last; ++i) { const int row = first_row + static_cast<int>(i - offset) * step; std::string label;
-      if (i == current->size()) label = "x Quit"; else { Entry& entry = (*current)[i]; label = (entry.checked ? "[x] " : "[ ] ") + entry.name + (!entry.children.empty() ? "  v" : ""); }
-      eips(row, std::string(i == selected ? "> [ " : "  [ ") + clipped(label) + " ]"); }
-    std::string footer = message.empty() ? "Entries " + std::to_string(offset + 1) + " - " + std::to_string(last) + " of " + std::to_string(count) + "  * KUAL Native" : message;
-    eips(rows - 2, clipped(footer, 70)); message.clear();
-    InputEvent event = next_input();
-    if (event.kind == Input::Back) { if (trail.empty()) return true; current = trail.back(); trail.pop_back(); labels.pop_back(); offsets.pop_back(); selected = 0; continue; }
-    if (event.kind == Input::Up) { selected = selected == 0 ? count - 1 : selected - 1; continue; }
-    if (event.kind == Input::Down) { selected = (selected + 1) % count; continue; }
-    if (event.x >= 0 && event.x_max > 0) { if (event.x * 8 < event.x_max) { if (!trail.empty()) { current = trail.back(); trail.pop_back(); labels.pop_back(); offsets.pop_back(); selected = 0; } continue; }
-      if (event.x * 8 > event.x_max * 7) { offset = (offset + page_size < count) ? offset + page_size : 0; selected = offset; continue; }
-      if (event.y >= 0 && event.y_max > 0) { int row = event.y * rows / event.y_max; if (row >= first_row) { size_t hit = offset + static_cast<size_t>((row - first_row) / step); if (hit < last) selected = hit; else continue; } else continue; } }
-    if (selected == current->size()) return true;
+    const size_t count = current->size() + 1; size_t& offset = offsets.back(); if (offset >= count) offset = 0; if (selected >= count) selected = offset;
+    draw_ui(fbink, layout, *current, trail, offset, selected, message, no_status); message.clear();
+    const InputEvent event = next_input();
+    if (event.kind == Input::Back) { if (trail.empty()) return true; current = &menu; trail_menus.clear(); trail.clear(); offsets.assign(1, 0); selected = 0; continue; }
+    if (event.kind == Input::Up) { selected = selected == offset ? std::min(count - 1, offset + 9) : selected - 1; continue; }
+    if (event.kind == Input::Down) { selected = selected == std::min(count - 1, offset + 9) ? offset : selected + 1; continue; }
+    if (event.x >= 0 && event.x_max > 0 && event.y_max > 0) {
+      const int x = event.x * layout.width / event.x_max, y = event.y * layout.height / event.y_max;
+      if (x < layout.rail) { if (!trail.empty()) { offset = page_offset(offset, -1, count); selected = offset; } continue; }
+      if (x >= layout.width - layout.rail) { offset = page_offset(offset, 1, count); selected = offset; continue; }
+      if (x < layout.content_x || x >= layout.content_x + layout.content_width || y < layout.top || y >= layout.bottom) continue;
+      const size_t row = static_cast<size_t>((y - layout.top) / (layout.button_height + layout.button_gap)); if (row >= 10) continue;
+      const size_t hit = offset + row; if (hit >= count) continue; selected = hit;
+    }
+    if (selected == current->size()) { if (trail.empty()) return true; current = &menu; trail_menus.clear(); trail.clear(); offsets.assign(1, 0); selected = 0; continue; }
     Entry& entry = (*current)[selected];
-    if (!entry.children.empty() && entry.action.empty()) { trail.push_back(current); labels.push_back(entry.name); current = &entry.children; offsets.push_back(0); selected = 0; continue; }
-    message = entry.show_action_status ? "Running: " + entry.name : ""; if (!entry.status.empty()) message = entry.status;
-    run_quietly("eips -c >/dev/null 2>&1"); eips(rows - 2, clipped(message.empty() ? "Running..." : message, 70));
-    int rc = execute(entry); if (entry.check_on_run) entry.checked = true;
-    if (entry.refresh) { menu = load_menus(root); trail.clear(); labels.clear(); offsets.assign(1, 0); current = &menu; selected = 0; message = "Menu refreshed."; continue; }
+    if (!entry.children.empty() && entry.action.empty()) { trail_menus.push_back(current); trail.push_back(entry.name); current = &entry.children; offsets.push_back(0); selected = 0; continue; }
+    message = entry.show_action_status ? entry.action : ""; draw_ui(fbink, layout, *current, trail, offset, selected, message, no_status);
+    const int rc = execute(entry); if (entry.check_on_run) entry.checked = true;
+    if (entry.refresh) { menu = load_menus(root); current = &menu; trail_menus.clear(); trail.clear(); offsets.assign(1, 0); selected = 0; message = "Refreshing the menu..."; continue; }
     if (entry.date) { std::time_t now = std::time(nullptr); message = std::ctime(&now); if (!message.empty() && message.back() == '\n') message.pop_back(); }
-    else message = rc == 0 ? "Done. Tap to continue" : "Failed (" + std::to_string(rc) + "). Tap to continue";
+    else if (!entry.show_action_status) message.clear(); else message = rc == 0 ? entry.action : "Failed (" + std::to_string(rc) + "): " + entry.action;
     if (entry.exit_menu) return true;
-    (void)next_input();
   }
 }
 #endif
