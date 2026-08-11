@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cctype>
+#include <ctime>
 #include <cstdlib>
 #include <dirent.h>
 #include <fstream>
@@ -78,10 +79,21 @@ class Parser {
   Json number() { ws(); char* end = nullptr; const char* begin = s_.c_str() + p_; double n = std::strtod(begin, &end); if (end == begin) fail("expected value"); p_ += static_cast<size_t>(end - begin); return Json{n}; }
 };
 
-struct Entry { std::string name, action, directory; int priority = 0; std::vector<Entry> children; };
+struct Entry {
+  std::string name, action, directory, status;
+  int priority = 0;
+  bool checked = false, check_on_run = false, refresh = false, show_action_status = true, date = false, hidden = false, exit_menu = true;
+  std::vector<Entry> children;
+};
 
 static std::optional<std::string> get_string(const Json::Object& o, const char* key) {
   auto it = o.find(key); if (it == o.end()) return std::nullopt; auto v = it->second.string(); return v ? std::optional<std::string>(*v) : std::nullopt;
+}
+static bool get_bool(const Json::Object& o, const char* key, bool fallback) {
+  auto it = o.find(key); if (it == o.end()) return fallback;
+  if (auto value = std::get_if<bool>(&it->second.value)) return *value;
+  if (auto value = it->second.string()) return *value == "true";
+  return fallback;
 }
 static std::vector<Entry> entries(const Json& node, const std::string& dir) {
   if (!node.is_array()) return {};
@@ -90,8 +102,14 @@ static std::vector<Entry> entries(const Json& node, const std::string& dir) {
     std::string action = get_string(o, "action").value_or("");
     if (auto params = get_string(o, "params")) action += (action.empty() ? "" : " ") + *params;
     int priority = 0; if (auto p = o.find("priority"); p != o.end()) if (auto n = std::get_if<double>(&p->second.value)) priority = static_cast<int>(*n);
-    Entry e{*name, action, dir, priority, {}}; auto child = o.find("items"); if (child != o.end()) e.children = entries(child->second, dir); out.push_back(std::move(e)); }
-  std::stable_sort(out.begin(), out.end(), [](const Entry& a, const Entry& b) { return a.name < b.name; });
+    Entry e; e.name = *name; e.action = action; e.directory = dir; e.priority = priority;
+    e.check_on_run = get_bool(o, "checked", false); e.refresh = get_bool(o, "refresh", false);
+    e.show_action_status = get_bool(o, "status", true); e.date = get_bool(o, "date", false);
+    e.hidden = get_bool(o, "hidden", false); e.exit_menu = get_bool(o, "exitmenu", true);
+    e.status = get_string(o, "status_text").value_or("");
+    auto child = o.find("items"); if (child != o.end()) e.children = entries(child->second, dir);
+    if (!e.hidden) out.push_back(std::move(e)); }
+  std::stable_sort(out.begin(), out.end(), [](const Entry& a, const Entry& b) { return a.priority != b.priority ? a.priority > b.priority : a.name < b.name; });
   return out;
 }
 static bool directory(const std::string& path) { struct stat st {}; return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode); }
@@ -146,36 +164,65 @@ static int screen_rows() {
   bool ok = ioctl(fd, FBIOGET_VSCREENINFO, &info) == 0; close(fd); return ok ? std::max(12U, info.yres / 24) : 24;
 }
 enum class Input { Up, Down, Select, Back };
-struct InputEvent { Input kind; int y = -1; int y_max = 0; };
+struct InputEvent { Input kind; int x = -1, y = -1, x_max = 0, y_max = 0; };
 static InputEvent next_input() {
-  std::vector<int> fds; std::vector<int> y_max; std::vector<int> last_y; std::vector<bool> touched;
+  std::vector<int> fds, x_max, y_max, last_x, last_y; std::vector<bool> touched;
+  auto close_inputs = [&fds] { for (int fd : fds) close(fd); };
   for (int n = 0; n < 16; ++n) { std::string path = "/dev/input/event" + std::to_string(n); int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK); if (fd < 0) continue;
-    input_absinfo abs {}; int maximum = ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &abs) == 0 ? abs.maximum : 0;
-    fds.push_back(fd); y_max.push_back(maximum); last_y.push_back(0); touched.push_back(false); }
+    input_absinfo abs {}; int xmaximum = ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &abs) == 0 ? abs.maximum : 0;
+    int ymaximum = ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &abs) == 0 ? abs.maximum : 0;
+    fds.push_back(fd); x_max.push_back(xmaximum); y_max.push_back(ymaximum); last_x.push_back(0); last_y.push_back(0); touched.push_back(false); }
   if (fds.empty()) return {Input::Back};
   for (;;) { std::vector<pollfd> watches(fds.size()); for (size_t i = 0; i < fds.size(); ++i) watches[i] = {fds[i], POLLIN, 0}; if (poll(watches.data(), watches.size(), -1) < 0) continue;
     for (size_t i = 0; i < watches.size(); ++i) { if (!(watches[i].revents & POLLIN)) continue; input_event event {};
       while (read(fds[i], &event, sizeof(event)) == sizeof(event)) {
-        if (event.type == EV_KEY && event.value == 1) { if (event.code == KEY_UP || event.code == KEY_PAGEUP || event.code == KEY_LEFT) { for (int fd : fds) close(fd); return {Input::Up}; }
-          if (event.code == KEY_DOWN || event.code == KEY_PAGEDOWN || event.code == KEY_RIGHT) { for (int fd : fds) close(fd); return {Input::Down}; }
-          if (event.code == KEY_ENTER || event.code == KEY_OK || event.code == KEY_SPACE) { for (int fd : fds) close(fd); return {Input::Select}; }
-          if (event.code == KEY_BACK || event.code == KEY_HOME || event.code == KEY_ESC) { for (int fd : fds) close(fd); return {Input::Back}; }
-          if (event.code == BTN_TOUCH) { if (event.value) touched[i] = true; else if (touched[i] && y_max[i] > 0) { for (int fd : fds) close(fd); return {Input::Select, last_y[i], y_max[i]}; } }
+        if (event.type == EV_KEY) {
+          if (event.code == BTN_TOUCH) { if (event.value) touched[i] = true; else if (touched[i] && y_max[i] > 0) { close_inputs(); return {Input::Select, last_x[i], last_y[i], x_max[i], y_max[i]}; } }
+          else if (event.value == 1) { if (event.code == KEY_UP || event.code == KEY_PAGEUP || event.code == KEY_LEFT) { close_inputs(); return {Input::Up}; }
+            if (event.code == KEY_DOWN || event.code == KEY_PAGEDOWN || event.code == KEY_RIGHT) { close_inputs(); return {Input::Down}; }
+            if (event.code == KEY_ENTER || event.code == KEY_OK || event.code == KEY_SPACE) { close_inputs(); return {Input::Select}; }
+            if (event.code == KEY_BACK || event.code == KEY_HOME || event.code == KEY_ESC) { close_inputs(); return {Input::Back}; } }
         }
+        if (event.type == EV_ABS && (event.code == ABS_MT_POSITION_X || event.code == ABS_X)) last_x[i] = event.value;
         if (event.type == EV_ABS && (event.code == ABS_MT_POSITION_Y || event.code == ABS_Y)) last_y[i] = event.value;
       }
     }
   }
 }
-static bool run_ui(const std::vector<Entry>& menu, const std::string& title = "KUAL Native") {
-  if (menu.empty()) { eips(2, "KUAL Native: no extensions found"); eips(4, "Tap or press Back to exit"); (void)next_input(); return false; }
-  size_t selected = 0; const int rows = screen_rows(); const size_t page = static_cast<size_t>(std::max(4, rows - 5));
-  for (;;) { size_t first = selected / page * page; run_quietly("eips -c >/dev/null 2>&1"); eips(1, title);
-    eips(2, "Up/Down or tap an item; Back exits"); for (size_t i = first; i < std::min(menu.size(), first + page); ++i) eips(static_cast<int>(4 + i - first), std::string(i == selected ? "> " : "  ") + menu[i].name);
-    InputEvent event = next_input(); switch (event.kind) { case Input::Up: selected = selected == 0 ? menu.size() - 1 : selected - 1; break; case Input::Down: selected = (selected + 1) % menu.size(); break;
-      case Input::Back: return true; case Input::Select: { if (event.y >= 0 && event.y_max > 0) { int row = event.y * rows / event.y_max; if (row >= 4 && static_cast<size_t>(row - 4) < page && first + static_cast<size_t>(row - 4) < menu.size()) selected = first + static_cast<size_t>(row - 4); }
-        const Entry& entry = menu[selected]; if (!entry.children.empty() && entry.action.empty()) { run_ui(entry.children, title + " / " + entry.name); break; }
-        eips(rows - 2, "Running: " + entry.name); int rc = execute(entry); eips(rows - 1, rc == 0 ? "Done. Tap to continue" : "Failed (" + std::to_string(rc) + "). Tap to continue"); (void)next_input(); break; } }
+static std::string clipped(const std::string& text, size_t width = 56) { return text.size() <= width ? text : text.substr(0, width - 3) + "..."; }
+static bool run_ui(std::vector<Entry> menu, const std::string& root = "/mnt/us/extensions") {
+  constexpr size_t page_size = 10;
+  std::vector<std::vector<Entry>*> trail; std::vector<std::string> labels; std::vector<size_t> offsets(1, 0); std::vector<Entry>* current = &menu;
+  size_t selected = 0; const int rows = screen_rows(); const int first_row = 5; const int step = std::max(3, (rows - 9) / static_cast<int>(page_size));
+  std::string message;
+  for (;;) {
+    const size_t count = current->size() + 1; size_t& offset = offsets.back(); if (offset >= count) offset = 0;
+    if (selected >= count) selected = 0; const size_t last = std::min(count, offset + page_size);
+    run_quietly("eips -c >/dev/null 2>&1");
+    std::string path = "/"; for (const auto& label : labels) path += label + "/"; eips(1, "#  KUAL  " + clipped(path, 55));
+    eips(2, std::string(trail.empty() ? "    " : "[ < Back ]") + "     [ KUAL menu ]     " + (count > page_size ? "[ Next > ]" : ""));
+    for (size_t i = offset; i < last; ++i) { const int row = first_row + static_cast<int>(i - offset) * step; std::string label;
+      if (i == current->size()) label = "x Quit"; else { Entry& entry = (*current)[i]; label = (entry.checked ? "[x] " : "[ ] ") + entry.name + (!entry.children.empty() ? "  v" : ""); }
+      eips(row, std::string(i == selected ? "> [ " : "  [ ") + clipped(label) + " ]"); }
+    std::string footer = message.empty() ? "Entries " + std::to_string(offset + 1) + " - " + std::to_string(last) + " of " + std::to_string(count) + "  * KUAL Native" : message;
+    eips(rows - 2, clipped(footer, 70)); message.clear();
+    InputEvent event = next_input();
+    if (event.kind == Input::Back) { if (trail.empty()) return true; current = trail.back(); trail.pop_back(); labels.pop_back(); offsets.pop_back(); selected = 0; continue; }
+    if (event.kind == Input::Up) { selected = selected == 0 ? count - 1 : selected - 1; continue; }
+    if (event.kind == Input::Down) { selected = (selected + 1) % count; continue; }
+    if (event.x >= 0 && event.x_max > 0) { if (event.x * 8 < event.x_max) { if (!trail.empty()) { current = trail.back(); trail.pop_back(); labels.pop_back(); offsets.pop_back(); selected = 0; } continue; }
+      if (event.x * 8 > event.x_max * 7) { offset = (offset + page_size < count) ? offset + page_size : 0; selected = offset; continue; }
+      if (event.y >= 0 && event.y_max > 0) { int row = event.y * rows / event.y_max; if (row >= first_row) { size_t hit = offset + static_cast<size_t>((row - first_row) / step); if (hit < last) selected = hit; else continue; } else continue; } }
+    if (selected == current->size()) return true;
+    Entry& entry = (*current)[selected];
+    if (!entry.children.empty() && entry.action.empty()) { trail.push_back(current); labels.push_back(entry.name); current = &entry.children; offsets.push_back(0); selected = 0; continue; }
+    message = entry.show_action_status ? "Running: " + entry.name : ""; if (!entry.status.empty()) message = entry.status;
+    run_quietly("eips -c >/dev/null 2>&1"); eips(rows - 2, clipped(message.empty() ? "Running..." : message, 70));
+    int rc = execute(entry); if (entry.check_on_run) entry.checked = true;
+    if (entry.refresh) { menu = load_menus(root); trail.clear(); labels.clear(); offsets.assign(1, 0); current = &menu; selected = 0; message = "Menu refreshed."; continue; }
+    if (entry.date) { std::time_t now = std::time(nullptr); message = std::ctime(&now); if (!message.empty() && message.back() == '\n') message.pop_back(); }
+    else message = rc == 0 ? "Done. Tap to continue" : "Failed (" + std::to_string(rc) + "). Tap to continue";
+    if (entry.exit_menu) return true; (void)next_input();
   }
 }
 #endif
