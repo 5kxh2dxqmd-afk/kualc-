@@ -1,0 +1,6 @@
+{
+  "items": [
+    {"name": "Hello", "action": "printf", "params": "hello"},
+    {"name": "Tools", "items": [{"name": "Nested", "action": "printf nested"}]}
+  ]
+}

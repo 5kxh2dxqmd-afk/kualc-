@@ -1,0 +1,4 @@
+#!/bin/sh
+# Host integration point for a 5.19.4+ native UI frontend.  Keeping menu
+# parsing/action execution here means a frontend only has to call this binary.
+exec /mnt/us/extensions/KUAL/bin/kual-native "$@"

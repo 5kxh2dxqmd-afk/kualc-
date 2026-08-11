@@ -1,0 +1,63 @@
+name: Build Kindle Native Launcher
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test host compatibility layer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure and build
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --parallel
+      - name: Run smoke tests
+        run: ./tests/smoke.sh ./build/kual-native
+
+  kindle-arm:
+    name: Build static Kindle ARM package
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ARM cross compiler
+        run: sudo apt-get update && sudo apt-get install -y g++-arm-linux-gnueabi file
+      - name: Configure Kindle ARM build
+        run: >-
+          cmake -S . -B build-kindle
+          -DCMAKE_TOOLCHAIN_FILE=toolchains/kindle-arm.cmake
+          -DCMAKE_BUILD_TYPE=MinSizeRel
+          -DKUAL_STATIC=ON
+          -DCMAKE_CXX_FLAGS='-march=armv5te -marm'
+      - name: Compile
+        run: cmake --build build-kindle --parallel
+      - name: Check artifact ABI
+        run: |
+          file build-kindle/kual-native
+          file build-kindle/kual-native | grep -q 'ARM'
+          file build-kindle/kual-native | grep -q 'statically linked'
+      - name: Assemble USB package
+        run: |
+          install -D -m 0755 build-kindle/kual-native dist/extensions/KUAL/bin/kual-native
+          install -D -m 0755 scripts/KUAL-Native.sh dist/documents/KUAL-Native.sh
+          install -D -m 0644 README.md dist/README.md
+          tar -C dist -czf KUAL-Native-armel.tar.gz extensions documents README.md
+      - name: Upload Kindle package
+        uses: actions/upload-artifact@v4
+        with:
+          name: KUAL-Native-armel
+          path: KUAL-Native-armel.tar.gz
+          if-no-files-found: error
+      - name: Attach package to GitHub release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: KUAL-Native-armel.tar.gz
