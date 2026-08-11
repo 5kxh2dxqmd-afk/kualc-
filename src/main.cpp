@@ -60,7 +60,9 @@ class Parser {
     expect('{'); Json::Object out; ws(); if (p_ < s_.size() && s_[p_] == '}') { ++p_; return Json{out}; }
     for (;;) { ws(); if (p_ == s_.size() || s_[p_] != '"') fail("object key must be a string");
       auto key = string_value(); expect(':'); out.emplace(std::move(key), value()); ws(); char c = take();
-      if (c == '}') return Json{out}; if (c != ',') fail("expected comma"); }
+      if (c == '}') return Json{out};
+      if (c != ',') fail("expected comma");
+    }
   }
   Json array() {
     expect('['); Json::Array out; ws(); if (p_ < s_.size() && s_[p_] == ']') { ++p_; return Json{out}; }
@@ -82,7 +84,8 @@ static std::optional<std::string> get_string(const Json::Object& o, const char* 
   auto it = o.find(key); if (it == o.end()) return std::nullopt; auto v = it->second.string(); return v ? std::optional<std::string>(*v) : std::nullopt;
 }
 static std::vector<Entry> entries(const Json& node, const std::string& dir) {
-  if (!node.is_array()) return {}; std::vector<Entry> out;
+  if (!node.is_array()) return {};
+  std::vector<Entry> out;
   for (const auto& j : node.array()) { if (!j.is_object()) continue; const auto& o = j.object(); auto name = get_string(o, "name"); if (!name) continue;
     std::string action = get_string(o, "action").value_or("");
     if (auto params = get_string(o, "params")) action += (action.empty() ? "" : " ") + *params;
@@ -95,7 +98,9 @@ static bool directory(const std::string& path) { struct stat st {}; return stat(
 static void load_menus_at(const std::string& root, std::vector<Entry>& result, unsigned depth = 0) {
   // KUAL's original parser searches recursively.  Bound the traversal so a
   // malicious link farm on USB storage cannot exhaust the launcher stack.
-  if (depth > 16) return; DIR* d = opendir(root.c_str()); if (!d) return;
+  if (depth > 16) return;
+  DIR* d = opendir(root.c_str());
+  if (!d) return;
   while (dirent* de = readdir(d)) { std::string name(de->d_name); if (name == "." || name == "..") continue;
     std::string path = root + "/" + name; if (!directory(path)) continue;
     std::string menu = path + "/menu.json"; std::ifstream f(menu);
@@ -109,7 +114,9 @@ static std::vector<Entry> load_menus(const std::string& root) {
   std::vector<Entry> result; load_menus_at(root, result); return result;
 }
 static int execute(const Entry& e) {
-  if (e.action.empty()) return 0; pid_t child = fork(); if (child < 0) { std::perror("fork"); return 127; }
+  if (e.action.empty()) return 0;
+  pid_t child = fork();
+  if (child < 0) { std::perror("fork"); return 127; }
   if (child == 0) { if (chdir(e.directory.c_str()) != 0) _exit(127); setenv("KUAL_EXTENSION_DIR", e.directory.c_str(), 1); execl("/bin/sh", "sh", "-c", e.action.c_str(), static_cast<char*>(nullptr)); _exit(127); }
   int status = 0; while (waitpid(child, &status, 0) < 0 && errno == EINTR) {} return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
 }
@@ -123,12 +130,16 @@ static const Entry* find(const std::vector<Entry>& menu, const std::string& path
 static std::string shell_quote(const std::string& value) {
   std::string out = "'"; for (char c : value) { if (c == '\'') out += "'\\\"'\\\"'"; else out += c; } return out + "'";
 }
+static void run_quietly(const std::string& command) {
+  const int status = std::system(command.c_str());
+  if (status == -1) return;
+}
 static void eips(int row, const std::string& text) {
   // eips is present on supported Kindle firmware and performs the
   // firmware-specific e-ink refresh; calling it avoids hard-coding private
   // framebuffer update ioctls that differ by generation.
   std::string command = "eips 2 " + std::to_string(row) + " " + shell_quote(text) + " >/dev/null 2>&1";
-  (void)std::system(command.c_str());
+  run_quietly(command);
 }
 static int screen_rows() {
   int fd = open("/dev/fb0", O_RDONLY); if (fd < 0) return 24; fb_var_screeninfo info {};
@@ -159,7 +170,7 @@ static InputEvent next_input() {
 static bool run_ui(const std::vector<Entry>& menu, const std::string& title = "KUAL Native") {
   if (menu.empty()) { eips(2, "KUAL Native: no extensions found"); eips(4, "Tap or press Back to exit"); (void)next_input(); return false; }
   size_t selected = 0; const int rows = screen_rows(); const size_t page = static_cast<size_t>(std::max(4, rows - 5));
-  for (;;) { size_t first = selected / page * page; (void)std::system("eips -c >/dev/null 2>&1"); eips(1, title);
+  for (;;) { size_t first = selected / page * page; run_quietly("eips -c >/dev/null 2>&1"); eips(1, title);
     eips(2, "Up/Down or tap an item; Back exits"); for (size_t i = first; i < std::min(menu.size(), first + page); ++i) eips(static_cast<int>(4 + i - first), std::string(i == selected ? "> " : "  ") + menu[i].name);
     InputEvent event = next_input(); switch (event.kind) { case Input::Up: selected = selected == 0 ? menu.size() - 1 : selected - 1; break; case Input::Down: selected = (selected + 1) % menu.size(); break;
       case Input::Back: return true; case Input::Select: { if (event.y >= 0 && event.y_max > 0) { int row = event.y * rows / event.y_max; if (row >= 4 && static_cast<size_t>(row - 4) < page && first + static_cast<size_t>(row - 4) < menu.size()) selected = first + static_cast<size_t>(row - 4); }
