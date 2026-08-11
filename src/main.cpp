@@ -197,7 +197,8 @@ static bool run_ui(std::vector<Entry> menu, const std::string& root = "/mnt/us/e
   std::string message;
   for (;;) {
     const size_t count = current->size() + 1; size_t& offset = offsets.back(); if (offset >= count) offset = 0;
-    if (selected >= count) selected = 0; const size_t last = std::min(count, offset + page_size);
+    if (selected >= count) selected = 0;
+    const size_t last = std::min(count, offset + page_size);
     run_quietly("eips -c >/dev/null 2>&1");
     std::string path = "/"; for (const auto& label : labels) path += label + "/"; eips(1, "#  KUAL  " + clipped(path, 55));
     eips(2, std::string(trail.empty() ? "    " : "[ < Back ]") + "     [ KUAL menu ]     " + (count > page_size ? "[ Next > ]" : ""));
@@ -222,7 +223,8 @@ static bool run_ui(std::vector<Entry> menu, const std::string& root = "/mnt/us/e
     if (entry.refresh) { menu = load_menus(root); trail.clear(); labels.clear(); offsets.assign(1, 0); current = &menu; selected = 0; message = "Menu refreshed."; continue; }
     if (entry.date) { std::time_t now = std::time(nullptr); message = std::ctime(&now); if (!message.empty() && message.back() == '\n') message.pop_back(); }
     else message = rc == 0 ? "Done. Tap to continue" : "Failed (" + std::to_string(rc) + "). Tap to continue";
-    if (entry.exit_menu) return true; (void)next_input();
+    if (entry.exit_menu) return true;
+    (void)next_input();
   }
 }
 #endif
