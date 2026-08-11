@@ -178,7 +178,8 @@ struct Screen { int width = 1272, height = 1696; };
 static Screen screen_size() {
   int fd = open("/dev/fb0", O_RDONLY); fb_var_screeninfo info {};
   if (fd >= 0 && ioctl(fd, FBIOGET_VSCREENINFO, &info) == 0) { close(fd); return {static_cast<int>(info.xres), static_cast<int>(info.yres)}; }
-  if (fd >= 0) close(fd); return {};
+  if (fd >= 0) close(fd);
+  return {};
 }
 enum class Input { Up, Down, Select, Back };
 struct InputEvent { Input kind; int x = -1, y = -1, x_max = 0, y_max = 0; };
@@ -275,7 +276,9 @@ static void draw_ui(const std::string& fbink, const Layout& l, const std::vector
 }
 static size_t page_offset(size_t offset, int direction, size_t count) {
   constexpr size_t page_size = 10; if (direction > 0) return offset + page_size < count ? offset + page_size : 0;
-  if (offset >= page_size) return offset - page_size; size_t last = count - count % page_size; return last == count && last >= page_size ? last - page_size : last;
+  if (offset >= page_size) return offset - page_size;
+  size_t last = count - count % page_size;
+  return last == count && last >= page_size ? last - page_size : last;
 }
 static bool run_ui(std::vector<Entry> menu, const std::string& root = "/mnt/us/extensions") {
   const std::string fbink = fbink_path(); if (!fbink_available(fbink)) { std::cerr << "kual-native: FBInk is required (set FBINK or install fbink).\n"; return false; }
