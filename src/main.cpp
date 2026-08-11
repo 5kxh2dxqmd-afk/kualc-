@@ -172,7 +172,10 @@ static std::string fbink_path() {
   return "fbink";
 }
 static bool fbink_available(const std::string& fbink) {
-  return std::system((shell_quote(fbink) + " -q -e >/dev/null 2>&1").c_str()) == 0;
+  // FBInk's environment query (-e) crashes in the libkh build shipped on
+  // current Kindles.  Asking for help is non-destructive and works across the
+  // supported FBInk releases, while still confirming the executable starts.
+  return std::system((shell_quote(fbink) + " -q -h >/dev/null 2>&1").c_str()) == 0;
 }
 struct Screen { int width = 1272, height = 1696; };
 static Screen screen_size() {
